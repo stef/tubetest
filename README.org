@@ -1,0 +1,26 @@
+* tubetest
+
+.. is simple shell-script to test the upload/download speed of your
+connection. Use it to check if your ISP throttles various services.
+
+You need a server on which you can login using ssh without passwords
+(see ssh-agent) for setting up a remote data sink/source.
+
+Depends on socat, apg, ksh, ssh
+
+#+BEGIN_SRC sh
+rm tubetest.log; ./tubetest testserver 20s 1080 6991 1080 8888
+adjusting timelimit to 20
+testing tcp/1080
+        [down] for 20s 437kB/s(min) 581kB/s(avg) 608kB/s(max) ▁▇▆▇▇▆▆█▇▆▇▇▆▇▆▇▇▇▇▆
+        [  up] for 20s 289kB/s(min) 385kB/s(avg) 562kB/s(max) ▆▃▁▄▁█▄▂▃▃▃▄▂▃▁▅▃▃▃▅▃
+testing tcp/6991
+        [down] for 20s 474kB/s(min) 587kB/s(avg) 609kB/s(max) ▁▇▇▇█▆▇▇▇▇▇▇▆▇▆▇▆▆▇▆
+        [  up] for 20s 320kB/s(min) 380kB/s(avg) 471kB/s(max) █▃▄▄▂▃▃▃▃▃▄▆▁▃▃▂▃▄▃▄▃
+testing tcp/1080
+        [down] for 20s 466kB/s(min) 592kB/s(avg) 630kB/s(max) ▁█▆▆▆▅▅▇▆▆▇▆▆▅▅▆▆▇▆▇
+        [  up] for 20s 339kB/s(min) 381kB/s(avg) 469kB/s(max) █▃▃▁▅▂▂▃▂▂▃▃▂▃▂▃▂▂▆▁▃
+testing tcp/8888
+        [down] for 20s 476kB/s(min) 588kB/s(avg) 615kB/s(max) ▁▇▇▆▇▇▇▇▆█▇▆▇▆▇▄▆▇▆▅
+        [  up] for 20s 295kB/s(min) 380kB/s(avg) 573kB/s(max) ▅▃▃▃▂▃▂▃▃▂▄▁▃▃▂▃▁█▁▃▃
+#+END_SRC

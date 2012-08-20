@@ -1,0 +1,112 @@
+#!/usr/bin/ksh
+#
+# dependencies: pv, socat, apg
+# invoke with
+# ./tubetest your.server.org 1080 6991 1080 8888
+
+log="tubetest.log"
+debug=/bin/false
+
+function cleanup {
+    # is a bit drastic, let's hope there are no other socat instances
+    # running on the testserver
+    ssh -q $testserver killall socat 2>/dev/null
+}
+
+function throughput {
+    port=$2
+    direction=$1
+    timer=${3:-30}
+    key=$(apg -q -a1 -n 1 -m 32 -M NCL)
+    printf "\t[%4s] for ${timer}s" $direction
+    printf "$(date --rfc-3339=ns|tr ' ' 't') $proto $port $direction ${timer}s\n" >>$log
+
+    cleanup
+
+    # start remote source/sink
+    if [[ $direction == 'down' ]]; then
+        # server sending constant stream of random numbers
+        $debug && print "\tstarting remote random source"
+        ssh -q $testserver socat exec:\"openssl enc -aes-128-ofb -k $key -in /dev/zero\" "$proto"4-listen:$port,reuseaddr 2>/dev/null &
+    else
+        # server acting as sink for sent data
+        $debug && print "\tstarting remote sink"
+        ssh -q $testserver socat "$proto"4-listen:$port,reuseaddr /dev/null 2>/dev/null &
+    fi
+
+    sleep 1
+
+    if [[ $direction == 'down' ]]; then
+        # client to receive "$proto" stream
+        $debug && print "\tstarting local sink"
+        [[ "$proto" == "tcp" ]] && retry=",retry=3,interval=3" || retry=""
+        echo "asdf" | socat "$proto"4:$testserver:$port$retry - 2>/dev/null |
+            pv -ftrab 2>&1 >/dev/null |&
+    else
+        # client sending constant stream of random data
+        $debug && print "\tstarting local random source"
+        [[ "$proto" == "tcp" ]] && retry=",retry=3,interval=3" || retry=""
+        (openssl enc -aes-128-ofb -k $key -in /dev/zero 2>/dev/null |
+            pv -ftrab |
+            socat - "$proto"4:$testserver:$port$retry >/dev/null 2>/dev/null) 2>&1 |&
+    fi
+
+    pid=$!
+    # set timer
+    (sleep $timer; kill $pid 2>/dev/null) &
+    # print metrix
+    sparkline=""; max=""; maxs=""; min=""; mins=""; avg=""
+    cat <&p | sed 's/\r/\n/g' | while read line; do
+        [[ -z "$line" ]] && continue
+        # lineformat example: 1.97MB 0:00:00 [ 580kB/s] [ 504kB/s]
+        s=$(echo "$line" | cut -d' ' -f4 | sed 's/]$//') # extract human readable speed
+
+        m=$(echo "$s" | sed 's/.*\(.\)...$/\1/') # get kilo/mega modifier
+        v=$(echo "$s" | sed 's/\(.*\)....$/\1/') # get speed
+        b=$(./kilo.awk $v $m b) # convert to speed to bytes/s
+        sparkline="$sparkline $b"
+
+        [[ -z "$max" || "$max" -lt "$b" ]] && {
+            maxs="$s"
+            max="$b"
+        }
+        [[ -z "$min" || "$min" -gt "$b" ]] && {
+            mins="$s"
+            min="$b"
+        }
+        v=$(echo "$line" | cut -d' ' -f4 | sed 's/]$//') # extract
+        avg=$(echo "$line" | cut -d' ' -f6 | sed 's/]$//') # extract human readable speed
+        t=$(echo "$line" | cut -d' ' -f2) # surgeon extraction
+        print "$t $s $avg" >>$log
+    done
+    printf " $mins(min) $avg(avg) $maxs(max) "
+    print "$(date --rfc-3339=ns) results $mins(min) $avg(avg) $maxs(max)" >>$log
+    ./spark $sparkline
+    cleanup
+}
+
+cleanup
+trap cleanup KILL TERM
+
+testserver=$1; shift 1
+proto="tcp"
+len="10"
+while [[ "$#" -gt 0 ]]; do
+    # udp is not working
+    #[[ "$1" == "udp" || "$1" == "tcp" ]] && {
+    #    proto="$1"
+    #    print "changing proto to $proto"
+    #    shift 1
+    #    continue
+    #}
+    print "$1" | egrep -qs "^[0-9]+s" && {
+        len=$(echo "$1" | sed 's/\(.*\)s$/\1/')
+        print "adjusting timelimit to $len"
+        shift 1
+        continue
+    }
+    print "testing $proto/$1"
+    throughput down "$1" "$len"
+    throughput up "$1" "$len"
+    shift 1
+done
