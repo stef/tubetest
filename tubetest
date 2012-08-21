@@ -1,6 +1,6 @@
 #!/usr/bin/ksh
 #
-# dependencies: pv, socat, apg
+# dependencies: pv, socat
 # invoke with
 # ./tubetest your.server.org 1080 6991 1080 8888
 
@@ -17,7 +17,6 @@ function throughput {
     port=$2
     direction=$1
     timer=${3:-30}
-    key=$(apg -q -a1 -n 1 -m 32 -M NCL)
     printf "\t[%4s] for ${timer}s" $direction
     printf "$(date --rfc-3339=ns|tr ' ' 't') $proto $port $direction ${timer}s\n" >>$log
 
@@ -27,7 +26,7 @@ function throughput {
     if [[ $direction == 'down' ]]; then
         # server sending constant stream of random numbers
         $debug && print "\tstarting remote random source"
-        ssh -q $testserver socat exec:\"openssl enc -aes-128-ofb -k $key -in /dev/zero\" "$proto"4-listen:$port,reuseaddr 2>/dev/null &
+        ssh -q $testserver socat exec:\"openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero\" "$proto"4-listen:$port,reuseaddr 2>/dev/null &
     else
         # server acting as sink for sent data
         $debug && print "\tstarting remote sink"
@@ -46,7 +45,7 @@ function throughput {
         # client sending constant stream of random data
         $debug && print "\tstarting local random source"
         [[ "$proto" == "tcp" ]] && retry=",retry=3,interval=3" || retry=""
-        (openssl enc -aes-128-ofb -k $key -in /dev/zero 2>/dev/null |
+        (openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero 2>/dev/null |
             pv -ftrab |
             socat - "$proto"4:$testserver:$port$retry >/dev/null 2>/dev/null) 2>&1 |&
     fi
@@ -61,7 +60,7 @@ function throughput {
         # lineformat example: 1.97MB 0:00:00 [ 580kB/s] [ 504kB/s]
         s=$(echo "$line" | cut -d' ' -f4 | sed 's/]$//') # extract human readable speed
 
-        m=$(echo "$s" | sed 's/.*\(.\)...$/\1/') # get kilo/mega modifier
+        m=$(echo "$s" | sed 's/.*\(.\)...$/\1/' | tr '[:upper:]' '[:lower:]') # get kilo/mega modifier
         v=$(echo "$s" | sed 's/\(.*\)....$/\1/') # get speed
         b=$(./kilo.awk $v $m b) # convert to speed to bytes/s
         sparkline="$sparkline $b"
