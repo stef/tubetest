@@ -6,7 +6,7 @@ connection. Use it to check if your ISP throttles various services.
 You need a server on which you can login using ssh without passwords
 (see ssh-agent) for setting up a remote data sink/source.
 
-Depends on socat, apg, ksh, ssh
+Depends on socat, apg, ksh, ssh, pv
 
 #+BEGIN_SRC sh
 rm tubetest.log; ./tubetest testserver 20s 1080 6991 1080 8888
