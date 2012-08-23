@@ -6,6 +6,7 @@
 
 log="tubetest.log"
 debug=/bin/false
+testserver=$1; shift 1
 
 function cleanup {
     # is a bit drastic, let's hope there are no other socat instances
@@ -13,53 +14,104 @@ function cleanup {
     ssh -q $testserver killall socat 2>/dev/null
 }
 
+function getownip {
+    ssh -q $testserver socat TCP4-LISTEN:4000,pktinfo,reuseaddr system:'"echo \"\\\"\$SOCAT_PEERADDR\\\"\""' &
+    socat tcp4:$testserver:4000,reuseaddr,retry=3,interval=3 -
+}
+
+function startlocalsink {
+    port=$1
+    # client to receive tcp stream
+    $debug && print "\tstarting local sink"
+    echo 'asdf' | socat "$proto"4:$testserver:$port,retry=3,interval=3 - 2>/dev/null |
+        pv -ftrab 2>&1 >/dev/null |&
+}
+
+function startlocalsource {
+    port=$1
+    # client sending constant stream of random data
+    $debug && print "\tstarting local random source"
+    [[ "$proto" == "tcp" ]] && { bsize="" ; retry=",retry=3,interval=3"; } || { retry="" ; bsize="-b 1472"; }
+    (openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero 2>/dev/null |
+        pv -ftrab |
+        socat $bsize - "$proto"4:$testserver:$port$retry >/dev/null 2>/dev/null) 2>&1 |&
+}
+
+function startremotesink {
+    port=$1
+    # server acting as sink for sent data
+    $debug && print "\tstarting remote sink"
+    ssh -q $testserver socat "$proto"4-listen:$port,reuseaddr /dev/null 2>/dev/null &
+}
+
+function startremotesource {
+    port=$1
+    # server sending constant stream of random numbers
+    $debug && print "\tstarting remote random source"
+    ssh -q $testserver socat exec:\"openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero\" "$proto"4-listen:$port,reuseaddr 2>/dev/null &
+}
+
+function startlocaludpsink {
+    port=$1
+    # client to receive tcp stream
+    $debug && print "\tstarting local sink"
+    socat udp4-recv:$port,reuseaddr - 2>/dev/null |
+        pv -ftrab 2>&1 >/dev/null |&
+}
+
+function startremoteudpsource {
+    [[ -z "$ownip" ]] && ownip=$(getownip)
+    port=$1
+    timer=$2
+    # server sending constant stream of random numbers
+    $debug && print "\tstarting remote random source"
+    ssh -q $testserver socat -b 1472 exec:\"openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero\" udp4-sendto:$ownip:$port,reuseaddr \& \; sleep $timer \; kill '$!' &
+}
+
 function throughput {
-    port=$2
     direction=$1
+    port=$2
     timer=${3:-30}
     printf "\t[%4s] for ${timer}s" $direction
     printf "$(date --rfc-3339=ns|tr ' ' 't') $proto $port $direction ${timer}s\n" >>$log
 
     cleanup
 
-    # start remote source/sink
-    if [[ $direction == 'down' ]]; then
-        # server sending constant stream of random numbers
-        $debug && print "\tstarting remote random source"
-        ssh -q $testserver socat exec:\"openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero\" "$proto"4-listen:$port,reuseaddr 2>/dev/null &
+    if [[ "$proto" == "udp" ]]; then
+        if [[ "$direction" == "down" ]]; then
+            startlocaludpsink $port
+            pid=$!
+            startremoteudpsource $port $timer
+        else
+            # UP
+            startremotesink $port
+            sleep 1
+            startlocalsource $port
+            pid=$!
+        fi
     else
-        # server acting as sink for sent data
-        $debug && print "\tstarting remote sink"
-        ssh -q $testserver socat "$proto"4-listen:$port,reuseaddr /dev/null 2>/dev/null &
+        # TCP
+        if [[ "$direction" == "down" ]]; then
+            startremotesource $port
+            sleep 1
+            startlocalsink $port
+            pid=$!
+        else
+            # UP
+            startlocalsource $port
+            pid=$!
+            startremotesink $port
+        fi
     fi
 
-    sleep 1
-
-    if [[ $direction == 'down' ]]; then
-        # client to receive "$proto" stream
-        $debug && print "\tstarting local sink"
-        [[ "$proto" == "tcp" ]] && retry=",retry=3,interval=3" || retry=""
-        echo "asdf" | socat "$proto"4:$testserver:$port$retry - 2>/dev/null |
-            pv -ftrab 2>&1 >/dev/null |&
-    else
-        # client sending constant stream of random data
-        $debug && print "\tstarting local random source"
-        [[ "$proto" == "tcp" ]] && retry=",retry=3,interval=3" || retry=""
-        (openssl enc -aes-128-ofb -k $RANDOM -in /dev/zero 2>/dev/null |
-            pv -ftrab |
-            socat - "$proto"4:$testserver:$port$retry >/dev/null 2>/dev/null) 2>&1 |&
-    fi
-
-    pid=$!
     # set timer
-    (sleep $timer; kill $pid 2>/dev/null) &
+    (sleep $timer; kill $pid ) &
     # print metrix
     sparkline=""; max=""; maxs=""; min=""; mins=""; avg=""
     cat <&p | sed 's/\r/\n/g' | while read line; do
         [[ -z "$line" ]] && continue
         # lineformat example: 1.97MB 0:00:00 [ 580kB/s] [ 504kB/s]
-        s=$(echo "$line" | cut -d' ' -f4 | sed 's/]$//') # extract human readable speed
-
+        s=$(echo "$line" | sed 's/.*\[\([^]]*\)].*/\1/') # extract human readable speed
         m=$(echo "$s" | sed 's/.*\(.\)...$/\1/' | tr '[:upper:]' '[:lower:]') # get kilo/mega modifier
         v=$(echo "$s" | sed 's/\(.*\)....$/\1/') # get speed
         b=$(./kilo.awk $v $m b) # convert to speed to bytes/s
@@ -73,8 +125,7 @@ function throughput {
             mins="$s"
             min="$b"
         }
-        v=$(echo "$line" | cut -d' ' -f4 | sed 's/]$//') # extract
-        avg=$(echo "$line" | cut -d' ' -f6 | sed 's/]$//') # extract human readable speed
+        avg=$(echo "$line" | sed 's/.*] \[\([^]]*\)].*/\1/') # extract human readable speed
         t=$(echo "$line" | cut -d' ' -f2) # surgeon extraction
         print "$t $s $avg" >>$log
     done
@@ -87,17 +138,16 @@ function throughput {
 cleanup
 trap cleanup KILL TERM
 
-testserver=$1; shift 1
 proto="tcp"
 len="10"
+ownip=''
 while [[ "$#" -gt 0 ]]; do
-    # udp is not working
-    #[[ "$1" == "udp" || "$1" == "tcp" ]] && {
-    #    proto="$1"
-    #    print "changing proto to $proto"
-    #    shift 1
-    #    continue
-    #}
+    [[ "$1" == "udp" || "$1" == "tcp" ]] && {
+        proto="$1"
+        print "changing proto to $proto"
+        shift 1
+        continue
+    }
     print "$1" | egrep -qs "^[0-9]+s" && {
         len=$(echo "$1" | sed 's/\(.*\)s$/\1/')
         print "adjusting timelimit to $len"
