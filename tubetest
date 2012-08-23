@@ -72,8 +72,6 @@ function throughput {
     direction=$1
     port=$2
     timer=${3:-30}
-    printf "\t[%4s] for ${timer}s" $direction
-    printf "$(date --rfc-3339=ns|tr ' ' 't') $proto $port $direction ${timer}s\n" >>$log
 
     cleanup
 
@@ -104,6 +102,10 @@ function throughput {
         fi
     fi
 
+    printf "\t[%4s] for ${timer}s     " $direction
+    printf "$(date --rfc-3339=ns|tr ' ' 't') $proto $port $direction ${timer}s\n" >>$log
+    # start progress feedback
+    (i=0; while [[ $i -le $timer ]] do printf "%3d%%" $(($i*100/$timer)); i=$((i+1)); sleep 1; done) &
     # set timer
     (sleep $timer; kill $pid ) &
     # print metrix
@@ -129,7 +131,7 @@ function throughput {
         t=$(echo "$line" | cut -d' ' -f2) # surgeon extraction
         print "$t $s $avg" >>$log
     done
-    printf " $mins(min) $avg(avg) $maxs(max) "
+    printf " $mins(min) $avg(avg) $maxs(max) "
     print "$(date --rfc-3339=ns) results $mins(min) $avg(avg) $maxs(max)" >>$log
     ./spark $sparkline
     cleanup
